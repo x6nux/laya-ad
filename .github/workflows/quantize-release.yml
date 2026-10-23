@@ -1,0 +1,68 @@
+name: quantize-release
+
+# 从 Release 里的 fp32 基准权重自动产出 FP16/BF16/FP8/INT8/INT4 并回传为 Release 资产。
+# 触发：release 发布时自动；或手动 dispatch（指定已存在的 tag）。
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要追加量化资产的 Release tag"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  quantize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps (CPU torch + transformers)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers safetensors
+
+      - name: Resolve tag and download fp32 base asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          gh release download "$TAG" -p 'laya-ad-*-fp32.tar.gz' -O fp32.tar.gz
+          tar xzf fp32.tar.gz
+          ls -d laya-ad-*/ 
+
+      - name: Quantize to fp16/bf16/fp8/int8/int4
+        run: |
+          python scripts/quantize_variants.py \
+            --src laya-ad-${TAG}-fp32 --out variants \
+            --variants fp16,bf16,fp8,int8,int4
+
+      - name: Structural verification per variant
+        run: |
+          for d in variants/*/; do
+            python scripts/verify_variant.py --model "$d"
+          done
+
+      - name: Package and upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for d in variants/*/; do
+            name=$(basename "$d")
+            tar czf "laya-ad-${TAG}-${name}.tar.gz" -C variants "$name"
+            sha256sum "laya-ad-${TAG}-${name}.tar.gz" | tee -a release-sha256.txt
+          done
+          gh release upload "$TAG" laya-ad-${TAG}-*.tar.gz release-sha256.txt --clobber

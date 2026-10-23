@@ -28,3 +28,6 @@ logs/
 runs/
 Thumbs.db
 .DS_Store
+
+# 本地打包产物
+release/

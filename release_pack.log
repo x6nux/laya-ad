@@ -1,0 +1,21 @@
+W1024 05:41:41.948000 88464 Lib\site-packages\torch\distributed\elastic\multiprocessing\redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
+[组装] fp32 / bf16 staging ...
+[校验] fp32 vs bf16，300 条留出样本（GPU）...
+Loading weights:   0%|          | 0/138 [00:00<?, ?it/s]Loading weights:  28%|██▊       | 38/138 [00:00<00:00, 369.79it/s]Loading weights:  56%|█████▌    | 77/138 [00:00<00:00, 373.21it/s]Loading weights: 100%|██████████| 138/138 [00:00<00:00, 660.67it/s]
+Loading weights:   0%|          | 0/138 [00:00<?, ?it/s]Loading weights:  41%|████▏     | 57/138 [00:00<00:00, 565.94it/s]Loading weights: 100%|██████████| 138/138 [00:00<00:00, 1223.66it/s]
+D:\code\laya-ad\.venv\Lib\site-packages\torch\_utils.py:455: UserWarning: TypedStorage is deprecated. It will be removed in the future and UntypedStorage will be the only storage class. This should only matter to you if you are using storages directly.  To access UntypedStorage directly, use tensor.untyped_storage() instead of tensor.storage()
+  device=storage.device,
+  fp32 acc=0.9700 | bf16 acc=0.9700 一致率=100.00%
+[组装] int8 staging ...
+[校验] int8 vs fp32 参照精度，300 条（CPU）...
+  int8 acc=0.9633
+
+=== 打包汇总 ===
+变体           包内容    tar.gz     压缩率  文件
+fp32     1205.9M    865.7M    74%  laya-ad-v1.0-fp32.tar.gz
+bf16      619.4M    469.5M    40%  laya-ad-v1.0-bf16.tar.gz
+int8      888.8M    549.9M    64%  laya-ad-v1.0-int8.tar.gz
+校验凭证: release\laya-ad-v1.0-results.json
+  laya-ad-v1.0-fp32.tar.gz  sha256 b03945c2853f51baadf0d6ec5714dd038a66fdca4e67230ff465fc4d0f51311f
+  laya-ad-v1.0-bf16.tar.gz  sha256 1e216dd5ab5f615ff48fe1228ded545a209919a62fcf2d729a142cebe701bc7a
+  laya-ad-v1.0-int8.tar.gz  sha256 92e901e9b0e075b8587058f99ca78df91697d8314829307e328857efac80fdb7
