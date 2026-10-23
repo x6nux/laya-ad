@@ -59,6 +59,21 @@ python scripts/predict.py --text "加微信免费领取涨粉秘籍，名额有�
 
 标签体系数据驱动（`label_map.json` 对齐），当前版本二分类 `ad` / `normal`。
 
+### 量化变体（Release v1.0，CI 自动产出）
+
+fp32 基准权重随 Release 发布（866MB），FP16/BF16/FP8/INT8/INT4 由 GitHub Actions 从 fp32 自动量化回传（`.github/workflows/quantize-release.yml`）。本地 val 集精度实测（bf16 计算，详见 Release 内 `variant-eval.json`）：
+
+| 变体 | accuracy | macro-F1 | 与基准一致率 | 体积（tar.gz） |
+|---|---|---|---|---|
+| fp32（基准权重） | 97.01% | 0.956 | — | 865MB |
+| fp16 | 97.06% | 0.957 | 100% | 545MB |
+| bf16 | 97.06% | 0.957 | 100% | 468MB |
+| fp8 (e4m3) | 97.06% | 0.957 | 100% | 228MB |
+| int8 (per-channel) | 97.11% | 0.957 | 99.95% | 273MB |
+| int4 (group=64) | 96.82% | 0.954 | 99.28% | 141MB |
+
+fp8/int8/int4 通过 `scripts/load_quantized.py` 的 `load_variant()` 加载（自动识别格式并反量化）；int8/int4 属有损量化，精度以自有数据验证为准。
+
 ## v1 性能对比
 
 | 项 | 微调后 | 对照 |
