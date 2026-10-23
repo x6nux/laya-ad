@@ -31,3 +31,7 @@ Thumbs.db
 
 # 本地打包产物
 release/
+
+# 本地日志
+*.log
+!docs/**/*.log
