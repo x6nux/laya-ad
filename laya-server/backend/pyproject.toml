@@ -1,0 +1,23 @@
+[project]
+name = "laya-server"
+version = "0.1.0"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.141.1",
+  "uvicorn==0.53.0",
+  "argon2-cffi==25.1.0",
+  "pydantic==2.13.5",
+  # ad-clf 后端依赖；torch 由镜像单独以 CPU 轮子安装（避免默认源拉 CUDA 版）
+  "transformers==5.20.2",
+  "safetensors>=0.6.0",
+]
+
+[project.optional-dependencies]
+test = ["httpx==0.28.1", "pytest==9.1.1"]
+
+[tool.fastapi]
+entrypoint = "server.main:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

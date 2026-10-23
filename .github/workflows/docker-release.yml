@@ -1,0 +1,107 @@
+name: Build and push laya-server images
+
+# 从 Release 的 fp32 基准权重自动量化出全部精度，逐精度构建 laya-server 镜像并推送 ghcr.io。
+# 触发：release 发布自动；或手动 dispatch（指定已存在的 tag）。
+# 镜像 tag：fp32/fp16/bf16/fp8/int8/int4 + latest 与 <tag>（两者均为 fp8）。
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "含 fp32 基准资产的 Release tag"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: laya-server-docker
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install quantization deps (CPU torch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers==5.20.2 "safetensors>=0.6.0"
+
+      - name: Resolve tag and download fp32 base asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          gh release download "$TAG" -p 'laya-ad-*-fp32.tar.gz' -O fp32.tar.gz
+          tar xzf fp32.tar.gz
+          echo "SRC=$(ls -d laya-ad-*-fp32)" >> "$GITHUB_ENV"
+
+      - name: Quantize all precisions
+        run: |
+          python scripts/quantize_variants.py --src "$SRC" --out build/variants \
+            --variants fp32,fp16,bf16,fp8,int8,int4
+
+      - name: Structural verification per variant
+        run: |
+          for d in build/variants/*/; do
+            python scripts/verify_variant.py --model "$d"
+          done
+
+      - name: Backend tests (ad-clf)
+        run: |
+          pip install 'fastapi==0.141.1' 'uvicorn==0.53.0' 'argon2-cffi==25.1.0' \
+                      'pydantic==2.13.5' 'httpx==0.28.1' 'pytest==9.1.1'
+          cd laya-server/backend && python -m pytest tests/test_ad_classifier.py -q
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push per-precision images
+        env:
+          IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/laya-server
+        run: |
+          set -e
+          for p in fp32 fp16 bf16 fp8 int8 int4; do
+            rm -rf build/docker-context
+            mkdir -p build/docker-context/models
+            cp -r laya-server/. build/docker-context/
+            rm -rf build/docker-context/.git
+            cp -r "build/variants/$p" build/docker-context/models/ad-clf
+            echo "$p" > build/docker-context/models/ad-clf/PRECISION.txt
+            docker buildx build --push --platform linux/amd64 \
+              --cache-from type=gha --cache-to type=gha,mode=max \
+              -t "$IMAGE_BASE:$p" build/docker-context
+          done
+
+      - name: Push latest and version tags (fp8)
+        env:
+          IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/laya-server
+        run: |
+          set -e
+          rm -rf build/docker-context/models && mkdir -p build/docker-context/models
+          cp -r build/variants/fp8 build/docker-context/models/ad-clf
+          echo fp8 > build/docker-context/models/ad-clf/PRECISION.txt
+          docker buildx build --push --platform linux/amd64 \
+            --cache-from type=gha --cache-to type=gha,mode=max \
+            -t "$IMAGE_BASE:latest" -t "$IMAGE_BASE:$TAG" build/docker-context

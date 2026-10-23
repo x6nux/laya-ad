@@ -1,0 +1,64 @@
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# env file
+.env
+.env.local
+
+# Local upstream Laya checkout. Include its pinned source in build artifacts,
+# but never commit it to this repository.
+/laya/
+
+# Python, frontend and local runtime data
+/.venv/
+**/__pycache__/
+*.py[cod]
+**/.pytest_cache/
+**/*.egg-info/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/*.tsbuildinfo
+/.pnpm-store/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+/models/
+/data/
+
+# Local AI development instructions and plans
+/openspec/
+AGENTS.md
+/.agents/
+/.codex/
+CLAUDE.md
+/.claude/
+GEMINI.md
+
+# macOS
+.DS_Store
+
+# Editor/IDE
+.idea/
+# .vscode/
+
+# Secret file
+.secret

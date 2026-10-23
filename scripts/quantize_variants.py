@@ -97,14 +97,16 @@ def main():
     for name in variants:
         dst = out_root / name
         dst.mkdir(parents=True, exist_ok=True)
-        if name in DTYPE_MAP:
+        if name == "fp32":
+            new_state = dict(state)  # 基准直拷
+        elif name in DTYPE_MAP:
             new_state = cast_variant(state, name)
         elif name == "int8":
             new_state = quant_int8(state)
         elif name == "int4":
             new_state = quant_int4(state)
         else:
-            raise SystemExit(f"[ERR] 未知变体 {name}（可选 fp16/bf16/fp8/int8/int4）")
+            raise SystemExit(f"[ERR] 未知变体 {name}（可选 fp32/fp16/bf16/fp8/int8/int4）")
         save_file(new_state, str(dst / "model.safetensors"), metadata={"format": "pt"})
         for f in ("config.json", "tokenizer.json", "tokenizer_config.json"):
             if (src / f).exists():

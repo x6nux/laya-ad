@@ -1,0 +1,73 @@
+English | <a href="README.zh-CN.md">简体中文</a>
+
+<p align="center"><img src="frontend/public/laya-server-logo-black.png" alt="LAYA SERVER" width="120" /></p>
+
+<h1 align="center">LAYA SERVER</h1>
+
+<p align="center">
+  <a href="https://github.com/1Panel-dev/laya-server/releases"><img src="https://img.shields.io/github/v/release/1Panel-dev/laya-server" alt="Release"></a>
+  <a href="https://github.com/1Panel-dev/laya-server/stargazers"><img src="https://img.shields.io/github/stars/1Panel-dev/laya-server" alt="GitHub stars"></a>
+  <a href="https://hub.docker.com/r/1panel/laya-server"><img src="https://img.shields.io/docker/pulls/1panel/laya-server" alt="Docker pulls"></a>
+  <a href="https://laya-ai.com/projects#project-1panel-dev-laya-server"><img src="https://laya-ai.com/badges/listed-on-laya-ai.svg" alt="Listed on laya-ai.com"></a>
+</p>
+
+LAYA SERVER is a self-hosted API and web interface for Laya's structured decision models, compatible with the TypeSafe Jev API format. It packages the System One inference capabilities of [upstream Laya](https://github.com/NandhaKishorM/laya) as a standalone service, making them easier to deploy and use in your applications.
+
+## Quick Start
+
+Once the image is published, install Docker and run the following command. Replace `latest` with a version tag to pin a release.
+
+```sh
+docker run -d --name laya-server --init --restart unless-stopped \
+  -p 8080:8080 \
+  -v laya-data:/data \
+  -e LAYA_ADMIN_USERNAME=admin \
+  -e LAYA_ADMIN_PASSWORD='change-this-admin-password' \
+  1panel/laya-server:latest
+```
+
+Replace the sample password with your own, then sign in at `http://YOUR_SERVER_IP:8080`. Create a key on the **API Keys** page; the full key is shown only once. `/health/ready` checks the model files. Data is stored in the `laya-data` volume.
+
+`YOUR_SERVER_IP` is your server's IP address. To use a domain name, configure HTTPS on a reverse proxy and forward requests to port 8080 on the server.
+
+## Screenshot
+
+![LAYA SERVER Playground](docs/images/screenshot-en.png)
+
+## Call the API
+
+```sh
+curl -X POST http://YOUR_SERVER_IP:8080/v1/systemone \
+  -H 'Authorization: Bearer YOUR_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"state":{"message":"I was charged twice"},"questions":{"refund":{"type":"noul","instructions":"Does the customer ask for a refund?"}}}'
+```
+
+Successful responses include `answers`, `model`, and actual token counts in `usage`. The published image includes the multilingual model; `model=auto` (the default) and `model=multilingual` are available. See **Documentation** in the console for more request examples.
+
+## Usage statistics and storage
+
+Inference responses enqueue usage statistics without waiting for SQLite writes. A single
+background thread per process reuses a connection, writes batches of up to 100 events,
+and coalesces `last_used_at` updates by API key. Partial batches flush after up to one
+second when the writer is idle; slow storage can delay statistics further. The `usage`
+field in each inference response is unchanged. `duration_ms` measures model prediction
+and result validation, not queue time or database writes.
+
+Statistics are best-effort, eventually consistent telemetry, not a billing or quota
+ledger. Each process buffers up to 1,000 queued events plus one in-flight batch. A full
+queue drops new statistics with rate-limited warnings. SQLite failures roll back where
+possible, log and drop the affected batch, then reconnect for later batches; failed
+batches are not retried because an uncertain commit could double-count usage. Neither
+condition turns successful inference into an HTTP 503. API-key authentication and
+revocation still use the database synchronously.
+
+Graceful shutdown attempts to drain the queue for up to five seconds. An in-flight
+SQLite call cannot be cancelled safely and may outlive that wait; forced termination,
+a shutdown timeout, or storage errors can lose unflushed statistics. Keep `/data` on
+low-latency persistent storage: background batching reduces write pressure but does
+not fix slow authentication reads or database locking.
+
+## License and Feedback
+
+This project is licensed under [Apache License 2.0](LICENSE). For issues and suggestions, visit [GitHub Issues](https://github.com/1Panel-dev/laya-server/issues).

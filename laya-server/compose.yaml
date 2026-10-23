@@ -1,0 +1,18 @@
+services:
+  app:
+    image: ghcr.io/x6nux/laya-server:${LAYA_IMAGE_TAG:-latest}
+    environment:
+      - LAYA_ADMIN_USERNAME
+      - LAYA_ADMIN_PASSWORD
+      - LAYA_CPU_THREADS
+      - LAYA_AD_BATCH
+      - LAYA_AD_BATCH_WINDOW_MS
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - laya-data:/data
+    restart: unless-stopped
+    init: true
+
+volumes:
+  laya-data:

@@ -29,8 +29,9 @@ runs/
 Thumbs.db
 .DS_Store
 
-# 本地打包产物
+# 本地打包产物与 docker 构建暂存
 release/
+build/
 
 # 本地日志
 *.log

@@ -1,0 +1,323 @@
+import os
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
+import pytest
+from argon2 import PasswordHasher
+from conftest import wait_for_usage
+
+os.environ.setdefault("LAYA_ADMIN_USERNAME", "test-admin")
+os.environ.setdefault("LAYA_ADMIN_PASSWORD_HASH", PasswordHasher().hash("test-password"))
+os.environ.setdefault("LAYA_DATABASE_PATH", "/tmp/laya-server-import-test.sqlite3")
+
+from server.config import Settings  # noqa: E402
+from server.main import create_app  # noqa: E402
+
+
+class FakePredictor:
+    def __init__(self):
+        self.calls = 0
+        self.models = []
+
+    def predict(self, state, questions, model=None):
+        self.calls += 1
+        self.models.append(model)
+        assert set(questions) == {"flag", "intent", "score"}
+        return {
+            "model": "laya-rl-agent",
+            "answers": {"flag": {"value": True}, "intent": {"value": "refund"}, "score": {"value": 2}},
+            "usage": {"input_tokens": 37, "output_tokens": 0},
+        }
+
+
+PAYLOAD = {
+    "state": {"message": "I need a refund today"},
+    "questions": {
+        "flag": {"type": "noul", "instructions": "Is it urgent?"},
+        "intent": {"type": "choice", "instructions": "What does the user want?", "criteria": {"refund": "money back", "help": "technical help"}},
+        "score": {"type": "score", "instructions": "How urgent?", "criteria": ["low", "medium", "high"]},
+    },
+}
+
+
+def test_multilingual_image_routes_auto_and_rejects_unbundled_models(tmp_path, client_factory):
+    model = tmp_path / "models" / "multilingual"
+    for filename in ("rl_agent_config.json", "model.safetensors", "tokenizer/tokenizer.json", "encoder/config.json"):
+        path = model / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    fake = FakePredictor()
+    settings = Settings("admin", PasswordHasher().hash("correct horse battery staple"), tmp_path / "db.sqlite3",
+                        1, tmp_path / "models", None, 1, tmp_path / "missing-dist", "multilingual")
+    client = client_factory(create_app(settings, fake))
+    assert client.get("/health/ready").status_code == 200
+    assert client.get("/internal/models").status_code == 401
+    origin = {"Origin": "http://testserver"}
+    assert client.post("/internal/auth/login", json={"username": "admin", "password": "correct horse battery staple"}, headers=origin).status_code == 200
+    assert client.get("/internal/models").json() == {"models": ["auto", "multilingual"]}
+    csrf = client.get("/internal/auth/session").json()["csrf_token"]
+    key = client.post("/internal/api-keys", json={"name": "smoke"}, headers={**origin, "X-CSRF-Token": csrf}).json()["key"]
+    headers = {"Authorization": f"Bearer {key}"}
+    assert client.post("/v1/systemone", json={**PAYLOAD, "model": "auto"}, headers=headers).status_code == 200
+    assert client.post("/v1/systemone", json={**PAYLOAD, "model": "multilingual"}, headers=headers).status_code == 200
+    for unsupported in ("english", "typed-decisions"):
+        response = client.post("/v1/systemone", json={**PAYLOAD, "model": unsupported}, headers=headers)
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "MODEL_NOT_AVAILABLE"
+    assert fake.models == ["multilingual", "multilingual"]
+
+
+def test_admin_password_from_environment(tmp_path, monkeypatch, client_factory):
+    password = "0123456789"
+    monkeypatch.setenv("LAYA_ADMIN_USERNAME", "configured-admin")
+    monkeypatch.setenv("LAYA_ADMIN_PASSWORD", password)
+    monkeypatch.setenv("LAYA_ADMIN_PASSWORD_HASH", "")
+    monkeypatch.delenv("LAYA_PUBLIC_ORIGIN", raising=False)
+    monkeypatch.setenv("LAYA_DATABASE_PATH", str(tmp_path / "db.sqlite3"))
+    settings = Settings.from_env()
+    monkeypatch.setenv("LAYA_MODEL_PROFILE", "multilingual")
+    assert Settings.from_env().model_profile == "multilingual"
+    monkeypatch.setenv("LAYA_MODEL_PROFILE", "unknown")
+    with pytest.raises(RuntimeError, match="LAYA_MODEL_PROFILE"):
+        Settings.from_env()
+    monkeypatch.delenv("LAYA_MODEL_PROFILE")
+    assert settings.admin_password_hash != password
+    assert settings.admin_password_hash.startswith("$argon2id$")
+    client = client_factory(create_app(settings, FakePredictor()))
+    response = client.post(
+        "/internal/auth/login",
+        json={"username": "configured-admin", "password": password},
+    )
+    assert response.status_code == 200
+    assert all("; secure" not in value.lower() for value in response.headers.get_list("set-cookie"))
+    csrf = client.get("/internal/auth/session").json()["csrf_token"]
+    assert client.post("/internal/api-keys", json={"name": "without-origin"},
+                       headers={"X-CSRF-Token": csrf}).status_code == 201
+
+    https_client = client_factory(create_app(settings, FakePredictor()), base_url="https://testserver")
+    secure_login = https_client.post("/internal/auth/login", json={"username": "configured-admin", "password": password})
+    assert secure_login.status_code == 200
+    assert all("; secure" in value.lower() for value in secure_login.headers.get_list("set-cookie"))
+    proxied_login = client.post("/internal/auth/login", json={"username": "configured-admin", "password": password},
+                               headers={"Origin": "https://console.example.com"})
+    assert proxied_login.status_code == 200
+    assert all("; secure" in value.lower() for value in proxied_login.headers.get_list("set-cookie"))
+
+    monkeypatch.setenv("LAYA_ADMIN_PASSWORD_HASH", PasswordHasher().hash(password))
+    with pytest.raises(RuntimeError, match="exactly one"):
+        Settings.from_env()
+    monkeypatch.setenv("LAYA_ADMIN_PASSWORD", "")
+    assert Settings.from_env().admin_password_hash == os.environ["LAYA_ADMIN_PASSWORD_HASH"]
+    monkeypatch.setenv("LAYA_ADMIN_PASSWORD_HASH", "")
+    with pytest.raises(RuntimeError, match="exactly one"):
+        Settings.from_env()
+    monkeypatch.setenv("LAYA_ADMIN_PASSWORD", "123456789")
+    with pytest.raises(RuntimeError, match="at least 10"):
+        Settings.from_env()
+
+
+def test_login_key_inference_usage_revoke_logout(tmp_path, client_factory):
+    fake = FakePredictor()
+    db_path = tmp_path / "db.sqlite3"
+    settings = Settings("admin", PasswordHasher().hash("correct horse battery staple"), db_path,
+                        1, tmp_path / "models", None, 1, tmp_path / "missing-dist")
+    client = client_factory(create_app(settings, fake))
+    origin = {"Origin": "http://testserver"}
+
+    assert client.get("/internal/api-keys").status_code == 401
+    assert client.post("/internal/auth/login", json={"username": "admin", "password": "wrong"}, headers=origin).status_code == 401
+    assert client.post("/internal/auth/login", json={"username": "admin", "password": "correct horse battery staple"}, headers=origin).status_code == 200
+    csrf = client.get("/internal/auth/session").json()["csrf_token"]
+    assert csrf
+    assert client.post("/internal/api-keys", json={"name": "production"}, headers=origin).status_code == 403
+    assert client.post("/internal/api-keys", json={"name": "production"}, headers={**origin, "X-CSRF-Token": "incorrect"}).status_code == 403
+    write_headers = {**origin, "X-CSRF-Token": csrf}
+    created = client.post("/internal/api-keys", json={"name": "production"}, headers=write_headers)
+    assert created.status_code == 201, created.text
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+    listing = client.get("/internal/api-keys").json()
+    assert key not in str(listing)
+    assert listing[0]["mask"].endswith(key[-6:])
+    with sqlite3.connect(db_path) as connection:
+        assert key not in str(connection.execute("SELECT * FROM api_keys").fetchall())
+
+    assert client.post("/v1/systemone", json=PAYLOAD).status_code == 401
+    assert client.post("/v1/systemone", json={"questions": {}}, headers={"Authorization": "Bearer invalid"}).status_code == 401
+    assert client.post("/v1/systemone", json=PAYLOAD, headers={"Authorization": "Bearer invalid"}).status_code == 401
+    assert fake.calls == 0
+    invalid = client.post("/v1/systemone", json={**PAYLOAD, "model": "wrong"}, headers={"Authorization": f"Bearer {key}"})
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"]["code"] == "VALIDATION_ERROR"
+    missing = client.post("/v1/systemone", json={"questions": PAYLOAD["questions"]}, headers={"Authorization": f"Bearer {key}"})
+    assert missing.status_code == 422
+    assert missing.json()["detail"]["errors"][0]["loc"] == ["body", "state"]
+    invalid_score = client.post(
+        "/v1/systemone",
+        json={
+            **PAYLOAD,
+            "questions": {
+                "score": {"type": "score", "instructions": "How urgent?", "criteria": ["same", "same"]},
+            },
+        },
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    assert invalid_score.status_code == 422
+    assert invalid_score.json()["detail"]["code"] == "VALIDATION_ERROR"
+    assert fake.calls == 0
+    prediction = client.post("/v1/systemone", json=PAYLOAD, headers={"Authorization": f"Bearer {key}"})
+    assert prediction.status_code == 200, prediction.text
+    assert prediction.json()["usage"] == {"input_tokens": 37, "output_tokens": 0}
+    assert set(prediction.json()["answers"]) == set(PAYLOAD["questions"])
+    assert fake.calls == 1
+    assert wait_for_usage(client, 1)["totals"] == {"requests": 1, "input_tokens": 37, "output_tokens": 0}
+    debug = client.post("/internal/playground", json=PAYLOAD, headers=write_headers)
+    assert debug.status_code == 200
+    usage = wait_for_usage(client, 2)
+    assert usage["totals"] == {"requests": 2, "input_tokens": 74, "output_tokens": 0}
+    assert {item["source"] for item in usage["sources"]} == {"api_key", "playground"}
+
+    assert client.post(f"/internal/api-keys/{key_id}/revoke", headers=write_headers).status_code == 200
+    assert client.post("/v1/systemone", json=PAYLOAD, headers={"Authorization": f"Bearer {key}"}).status_code == 401
+    assert fake.calls == 2
+    assert client.post("/internal/auth/logout", headers=write_headers).status_code == 200
+    assert client.get("/internal/api-keys").status_code == 401
+
+    restarted = client_factory(create_app(settings, fake))
+    assert restarted.post("/v1/systemone", json=PAYLOAD, headers={"Authorization": f"Bearer {key}"}).status_code == 401
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM usage_events").fetchone()[0] == 2
+
+
+def test_rate_limit_expiry_and_model_failure(tmp_path, client_factory):
+    class UnavailablePredictor:
+        def predict(self, state, questions, model=None):
+            raise FileNotFoundError("secret internal model path")
+
+    db_path = tmp_path / "db.sqlite3"
+    settings = Settings("admin", PasswordHasher().hash("password"), db_path,
+                        1, tmp_path / "models", None, 1, tmp_path / "missing-dist")
+    client = client_factory(create_app(settings, UnavailablePredictor()))
+    origin = {"Origin": "http://testserver"}
+    assert client.get("/health/ready").json()["detail"]["code"] == "MODEL_UNAVAILABLE"
+    assert client.get("/docs").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+    for _ in range(5):
+        assert client.post("/internal/auth/login", json={"username": "admin", "password": "wrong"}, headers=origin).status_code == 401
+    assert client.post("/internal/auth/login", json={"username": "admin", "password": "password"}, headers=origin).status_code == 429
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DELETE FROM login_attempts")
+    assert client.post("/internal/auth/login", json={"username": "admin", "password": "password"}, headers=origin).status_code == 200
+    csrf = client.get("/internal/auth/session").json()["csrf_token"]
+    created = client.post("/internal/api-keys", json={"name": "test"}, headers={**origin, "X-CSRF-Token": csrf})
+    key = created.json()["key"]
+    response = client.post("/v1/systemone", json=PAYLOAD, headers={"Authorization": f"Bearer {key}"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "MODEL_UNAVAILABLE"
+    assert "secret internal" not in response.text
+    assert client.get("/internal/usage").json()["totals"]["requests"] == 0
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("UPDATE sessions SET expires_at='2000-01-01T00:00:00+00:00'")
+    assert client.get("/internal/api-keys").status_code == 401
+
+
+@pytest.mark.parametrize("keep_cookies", [True, False], ids=["stale-cookies", "expired-cookies"])
+def test_login_after_session_expiry(tmp_path, keep_cookies, client_factory):
+    db_path = tmp_path / "db.sqlite3"
+    settings = Settings("admin", PasswordHasher().hash("test-password"), db_path,
+                        1, tmp_path / "models", None, 1, tmp_path / "missing-dist")
+    client = client_factory(create_app(settings, FakePredictor()))
+    credentials = {"username": "admin", "password": "test-password"}
+    origin = {"Origin": "http://testserver"}
+    assert client.post("/internal/auth/login", json=credentials, headers=origin).status_code == 200
+    old_session = client.cookies["laya_session"]
+    old_csrf = client.get("/internal/auth/session").json()["csrf_token"]
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("UPDATE sessions SET expires_at='2000-01-01T00:00:00+00:00'")
+    if not keep_cookies:
+        client.cookies.clear()
+
+    assert client.get("/internal/auth/session").status_code == 401
+    assert client.get("/internal/api-keys").status_code == 401
+    old_headers = {**origin, "X-CSRF-Token": old_csrf}
+    assert client.post("/internal/api-keys", json={"name": "expired"}, headers=old_headers).status_code == 401
+    assert client.post("/internal/auth/logout", headers=old_headers).status_code == 401
+
+    # Signing in does not require a successful logout or a valid old CSRF token.
+    assert client.post("/internal/auth/login", json=credentials, headers=origin).status_code == 200
+    assert client.cookies["laya_session"] != old_session
+    session = client.get("/internal/auth/session")
+    assert session.status_code == 200
+    new_csrf = session.json()["csrf_token"]
+    assert new_csrf and new_csrf != old_csrf
+    assert client.get("/internal/api-keys").status_code == 200
+    assert client.post("/internal/api-keys", json={"name": "stale-csrf"}, headers=old_headers).status_code == 403
+    created = client.post("/internal/api-keys", json={"name": "after-login"},
+                          headers={**origin, "X-CSRF-Token": new_csrf})
+    assert created.status_code == 201
+    assert [key["name"] for key in client.get("/internal/api-keys").json()] == ["after-login"]
+
+
+def test_concurrent_inference_requests_are_not_rejected(tmp_path, client_factory):
+    class ConcurrentPredictor(FakePredictor):
+        def __init__(self):
+            super().__init__()
+            self.started = Barrier(3, timeout=10)
+
+        def predict(self, state, questions, model=None):
+            self.started.wait()
+            return super().predict(state, questions, model)
+
+    settings = Settings("admin", PasswordHasher().hash("test-password"), tmp_path / "db.sqlite3",
+                        1, tmp_path / "models", None, 1, tmp_path / "missing-dist")
+    app = create_app(settings, ConcurrentPredictor())
+    client = client_factory(app)
+    origin = {"Origin": "http://testserver"}
+    assert client.post("/internal/auth/login", json={"username": "admin", "password": "test-password"}, headers=origin).status_code == 200
+    csrf = client.get("/internal/auth/session").json()["csrf_token"]
+    key = client.post("/internal/api-keys", json={"name": "parallel"},
+                      headers={**origin, "X-CSRF-Token": csrf}).json()["key"]
+
+    def request(index: int):
+        if index == 2:
+            return client.post("/internal/playground", json=PAYLOAD,
+                               headers={**origin, "X-CSRF-Token": csrf})
+        return client.post("/v1/systemone", json=PAYLOAD, headers={"Authorization": f"Bearer {key}"})
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        responses = list(executor.map(request, range(3)))
+
+    assert [response.status_code for response in responses] == [200, 200, 200]
+    assert wait_for_usage(client, 3)["totals"]["requests"] == 3
+    with sqlite3.connect(settings.database_path) as connection:
+        assert dict(connection.execute("SELECT source, COUNT(*) FROM usage_events GROUP BY source").fetchall()) == {
+            "api_key": 2, "playground": 1,
+        }
+
+
+def test_question_criteria_validation():
+    from server.schemas import ChoiceQuestion, ScoreQuestion
+    from pydantic import ValidationError
+
+    valid_score = ScoreQuestion(instructions="Rate", type="score", criteria=["low", "medium", "high"])
+    assert valid_score.criteria == ["low", "medium", "high"]
+
+    with pytest.raises(ValidationError, match="score criteria labels must be nonempty and unique"):
+        ScoreQuestion(instructions="Rate", type="score", criteria=["low", "low"])
+
+    with pytest.raises(ValidationError, match="score criteria labels must be nonempty and unique"):
+        ScoreQuestion(instructions="Rate", type="score", criteria=["low", "   "])
+
+    with pytest.raises(ValidationError, match="score criteria labels must be nonempty and unique"):
+        ScoreQuestion(instructions="Rate", type="score", criteria=["low", " low "])
+
+    ChoiceQuestion(instructions="Choose", type="choice", criteria=["option_a", "option_b"])
+    ChoiceQuestion(instructions="Choose", type="choice", criteria={"option_a": "desc A", "option_b": "desc B"})
+
+    with pytest.raises(ValidationError, match="choice labels must be nonempty and unique"):
+        ChoiceQuestion(instructions="Choose", type="choice", criteria=["opt", "opt"])
+
+    with pytest.raises(ValidationError, match="choice labels must be nonempty and unique"):
+        ChoiceQuestion(instructions="Choose", type="choice", criteria=["opt", "  "])
