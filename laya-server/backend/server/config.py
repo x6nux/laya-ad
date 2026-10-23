@@ -13,10 +13,7 @@ class Settings:
     session_hours: int
     model_dir: Path
     device: str | None
-    max_loaded_models: int
     frontend_dir: Path
-    model_profile: str = "all"
-    backend: str = "laya"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -31,20 +28,11 @@ class Settings:
             if len(password) < 10:
                 raise RuntimeError("LAYA_ADMIN_PASSWORD must contain at least 10 characters")
             password_hash = PasswordHasher().hash(password)
-        model_profile = os.environ.get("LAYA_MODEL_PROFILE", "all")
-        if model_profile not in ("all", "multilingual"):
-            raise RuntimeError("LAYA_MODEL_PROFILE must be all or multilingual")
-        backend = os.environ.get("LAYA_BACKEND", "laya")
-        if backend not in ("laya", "ad-clf"):
-            raise RuntimeError("LAYA_BACKEND must be laya or ad-clf")
         return cls(
             username, password_hash,
             Path(os.environ.get("LAYA_DATABASE_PATH", "/data/laya.sqlite3")),
             int(os.environ.get("LAYA_SESSION_HOURS", "12")),
             Path(os.environ.get("LAYA_MODEL_DIR", "/models")),
             os.environ.get("LAYA_DEVICE") or None,
-            int(os.environ.get("LAYA_MAX_LOADED_MODELS", "1")),
             Path(os.environ.get("LAYA_FRONTEND_DIR", "/app/frontend/dist")),
-            model_profile,
-            backend,
         )

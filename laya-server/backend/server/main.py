@@ -16,9 +16,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from .ad_classifier import AdClassifierPredictor, Predictor
 from .config import Settings
 from .database import Database, utc_now
-from .laya_adapter import LayaAdapter, Predictor
 from .schemas import CreateKeyRequest, InferenceRequest, LoginRequest
 from .usage_writer import UsageEvent, UsageWriter
 
@@ -109,43 +109,25 @@ def create_app(settings: Settings | None = None, predictor: Predictor | None = N
     ApiKeyId = Annotated[int, Depends(api_key_id)]
 
     def infer(payload: InferenceRequest, source: str, key_id: int | None) -> dict[str, Any]:
-        if settings.backend == "ad-clf":
-            if payload.model not in ("auto", "ad-clf"):
-                raise error(422, "MODEL_NOT_AVAILABLE", "Only the ad-clf model is installed")
-        elif settings.model_profile == "multilingual" and payload.model not in ("auto", "multilingual"):
-            raise error(422, "MODEL_NOT_AVAILABLE", "Only the multilingual model is installed")
+        if payload.model not in ("auto", "ad-clf"):
+            raise error(422, "MODEL_NOT_AVAILABLE", "Only the ad-clf model is installed")
         with router_lock:
             if "router" not in router_holder:
                 try:
-                    if settings.backend == "ad-clf":
-                        from .ad_classifier import AdClassifierPredictor
-                        router_holder["router"] = AdClassifierPredictor(
-                            settings.model_dir, settings.device)
-                    else:
-                        router_holder["router"] = predictor or LayaAdapter(
-                            settings.model_dir, settings.device, settings.max_loaded_models,
-                            settings.model_profile
-                        )
+                    router_holder["router"] = predictor or AdClassifierPredictor(
+                        settings.model_dir, settings.device
+                    )
                 except Exception:
-                    logger.exception("Failed to initialize model router")
+                    logger.exception("Failed to initialize ad-clf predictor")
                     raise error(503, "MODEL_UNAVAILABLE", "Model is unavailable")
         started = time.monotonic()
         try:
             overrides = {} if payload.max_len is None else {"max_len": payload.max_len}
-            if settings.backend == "ad-clf":
-                result = router_holder["router"].predict(
-                    payload.state,
-                    {qid: q.model_dump(exclude_none=True) for qid, q in payload.questions.items()},
-                    **overrides,
-                )
-            else:
-                result = router_holder["router"].predict(
-                    payload.state,
-                    {qid: q.model_dump(exclude_none=True) for qid, q in payload.questions.items()},
-                    model=("multilingual" if settings.model_profile == "multilingual" else None)
-                    if payload.model == "auto" else payload.model,
-                    **overrides,
-                )
+            result = router_holder["router"].predict(
+                payload.state,
+                {qid: q.model_dump(exclude_none=True) for qid, q in payload.questions.items()},
+                **overrides,
+            )
             if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
                 raise ValueError("Laya returned invalid answers")
             usage = result["usage"]
@@ -171,20 +153,10 @@ def create_app(settings: Settings | None = None, predictor: Predictor | None = N
 
     @app.get("/health/ready")
     def ready() -> dict[str, str]:
-        if settings.backend == "ad-clf":
-            if not (settings.model_dir / "model.safetensors").is_file() \
-                    or not (settings.model_dir / "config.json").is_file() \
-                    or not (settings.model_dir / "tokenizer.json").is_file():
-                raise error(503, "MODEL_UNAVAILABLE", "ad-clf model files are missing")
-            return {"status": "ready"}
-        names = ("multilingual",) if settings.model_profile == "multilingual" else ("english", "multilingual", "typed-decisions")
-        for name in names:
-            directory = settings.model_dir / name
-            if (not (directory / "rl_agent_config.json").is_file()
-                    or not (directory / "model.safetensors").is_file()
-                    or not (directory / "tokenizer" / "tokenizer.json").is_file()
-                    or not (directory / "encoder" / "config.json").is_file()):
-                raise error(503, "MODEL_UNAVAILABLE", f"Model files for {name} are missing")
+        if not (settings.model_dir / "model.safetensors").is_file() \
+                or not (settings.model_dir / "config.json").is_file() \
+                or not (settings.model_dir / "tokenizer.json").is_file():
+            raise error(503, "MODEL_UNAVAILABLE", "ad-clf model files are missing")
         return {"status": "ready"}
 
     @app.post("/internal/auth/login")
@@ -241,10 +213,7 @@ def create_app(settings: Settings | None = None, predictor: Predictor | None = N
 
     @app.get("/internal/models")
     def available_models(session: Session) -> dict[str, list[str]]:
-        if settings.backend == "ad-clf":
-            return {"models": ["auto", "ad-clf"]}
-        names = ["auto", "multilingual"] if settings.model_profile == "multilingual" else ["auto", "english", "multilingual", "typed-decisions"]
-        return {"models": names}
+        return {"models": ["auto", "ad-clf"]}
 
     @app.post("/internal/api-keys", status_code=201)
     def create_key(payload: CreateKeyRequest, session: Session, _: WriteSession) -> dict[str, Any]:

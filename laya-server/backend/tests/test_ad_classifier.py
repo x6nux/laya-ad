@@ -41,7 +41,7 @@ def _settings(model_dir: Path, tmp_path: Path) -> Settings:
     frontend = tmp_path / "frontend-dist"
     frontend.mkdir(exist_ok=True)
     return Settings("admin", PasswordHasher().hash(PASSWORD), tmp_path / "db.sqlite3",
-                    1, Path(model_dir), None, 1, frontend, "all", "ad-clf")
+                    1, Path(model_dir), None, frontend)
 
 
 @pytest.fixture()

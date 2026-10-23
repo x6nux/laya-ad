@@ -20,7 +20,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 import torch
 
@@ -28,6 +28,13 @@ from .quant_loader import detect_precision, load_ad_model
 
 _AD_RE = re.compile(r"ad|advert|广告", re.IGNORECASE)
 _AD_LABELS = {"ad", "clean"}
+
+
+class Predictor(Protocol):
+    """Jev 推理 Predictor 协议（与上游 LayaAdapter 相同的形状契约）。"""
+
+    def predict(self, state: Any, questions: dict[str, Any], model: str | None = None,
+                *, max_len: int | None = None) -> dict[str, Any]: ...
 
 
 def _extract_text(state: Any) -> str:
