@@ -1,0 +1,12 @@
+# 中文广告识别微调推荐超参（train_ad.py --config configs/train_ad.yaml 生效）
+# 对应 train_ad.py 的 argparse 参数名
+model: models/mmbert-ad
+train: data/processed/train.jsonl
+val: data/processed/val.jsonl
+output: outputs/ad-clf
+max_len: 512          # 广告文本普遍很短，可降为 128/256 换吞吐
+epochs: 3
+batch_size: 32        # 16GB 卡 bf16 下 22 层 ModernBERT 可以开更大，跑通后试 64/128
+grad_accum: 1
+lr: 3.0e-5            # 分类头微调经典区间 2e-5 ~ 5e-5
+warmup_ratio: 0.06

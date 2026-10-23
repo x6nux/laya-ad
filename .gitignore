@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# 虚拟环境
+.venv/
+
+# 模型权重（下载/抽取/训练产物均不入库）
+models/
+outputs/
+*.safetensors
+*.pt
+
+# 原始语料与处理产物（数据属内部机密，禁止入库；zip 原始包也在 data/raw/dataset/ 下）
+data/raw/
+data/processed/
+
+# 全局扩展名防护：任何位置的语料文件都不入库（双保险）
+*.jsonl
+*.jsonl.gz
+
+# ZCode 工作流草稿与运行记录（机器所有）
+.zcode/
+
+# 日志与系统文件
+logs/
+runs/
+Thumbs.db
+.DS_Store

@@ -1,0 +1,15 @@
+# torch 必须单独先装（RTX 50 系 / sm_120 需要 cu128 轮子，PyPI 默认轮子不带 sm_120）：
+#   uv pip install --python .venv/Scripts/python.exe torch --index-url https://download.pytorch.org/whl/cu128
+# 装完 torch 再装本文件：
+#   uv pip install --python .venv/Scripts/python.exe -r requirements.txt
+transformers>=5.0.0
+accelerate>=1.0
+datasets>=3.0
+evaluate>=0.4
+scikit-learn>=1.5
+safetensors>=0.4.5
+tensorboard>=2.17
+huggingface_hub>=0.26
+sentencepiece
+protobuf
+pyyaml
