@@ -79,16 +79,24 @@ fp8/int8/int4 通过 `scripts/load_quantized.py` 的 `load_variant()` 加载（�
 `laya-server/` 为独立维护分支（基线 1Panel-dev/laya-server @ 19471b2d）：Jev 兼容 `/v1/systemone` API + Web 控制台，后端接 ad-clf 分类器，内置动态微批 / CPU 半核线程 / bf16 推理（100 并发整批 ≤1s SLO 那套）。镜像构建时自动从 Release 最新权重在镜像内量化：
 
 ```bash
-# latest 与 v1.0 = fp8；其余 tag：v1.0-fp32 / fp16 / bf16 / fp8 / int8 / int4
-docker run -d -p 8080:8080 -e LAYA_ADMIN_USERNAME=admin -e LAYA_ADMIN_PASSWORD='改成你的密码' \
+# latest 与裸版本 tag（v1.0）= fp8；其余 tag：v1.0-fp32 / fp16 / bf16 / fp8 / int8 / int4
+docker run -d --name laya-server --init --restart unless-stopped \
+  -p 8080:8080 \
+  -v laya-data:/data \
+  -e LAYA_ADMIN_USERNAME=admin \
+  -e LAYA_ADMIN_PASSWORD='change-this-admin-password' \
   ghcr.io/x6nux/laya-server:latest
+
+# 锁定精度：把 latest 换成对应 tag 即可，例如 fp32 基准
+#   ghcr.io/x6nux/laya-server:v1.0-fp32
+# CPU 旋钮（可选）：-e LAYA_CPU_THREADS=8 -e LAYA_AD_BATCH=32 -e LAYA_AD_BATCH_WINDOW_MS=15
 
 curl -X POST http://127.0.0.1:8080/v1/systemone \
   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
   -d '{"state":{"message":{"text":"加微信免费领取涨粉秘籍，名额有限！"}},"questions":{"is_ad":{"type":"choice","instructions":"判断是否广告","criteria":{"ad":"广告","clean":"正常"}}}}'
 ```
 
-发新 Release 后 CI 自动重建全部精度镜像（`.github/workflows/docker-release.yml`）。
+替换示例密码后登录 `http://127.0.0.1:8080`，在 **API Keys** 页创建密钥（完整 key 只显示一次）；`/health/ready` 检查模型文件就绪，判定记录存于 `laya-data` 卷。发新 Release 后 CI 自动重建全部精度镜像（`.github/workflows/docker-release.yml`）。
 
 ## v1 性能对比
 

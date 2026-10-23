@@ -23,7 +23,7 @@ docker run -d --name laya-server --init --restart unless-stopped \
   -v laya-data:/data \
   -e LAYA_ADMIN_USERNAME=admin \
   -e LAYA_ADMIN_PASSWORD='change-this-admin-password' \
-  1panel/laya-server:latest
+  ghcr.io/x6nux/laya-server:latest
 ```
 
 将示例密码换成自己的密码，访问 `http://YOUR_SERVER_IP:8080` 登录，在 **API Keys** 页面创建密钥；完整密钥只显示一次。`/health/ready` 可用于检查模型文件。数据保存在 `laya-data` 卷中。

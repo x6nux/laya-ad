@@ -23,7 +23,7 @@ docker run -d --name laya-server --init --restart unless-stopped \
   -v laya-data:/data \
   -e LAYA_ADMIN_USERNAME=admin \
   -e LAYA_ADMIN_PASSWORD='change-this-admin-password' \
-  1panel/laya-server:latest
+  ghcr.io/x6nux/laya-server:latest
 ```
 
 Replace the sample password with your own, then sign in at `http://YOUR_SERVER_IP:8080`. Create a key on the **API Keys** page; the full key is shown only once. `/health/ready` checks the model files. Data is stored in the `laya-data` volume.
@@ -43,7 +43,7 @@ curl -X POST http://YOUR_SERVER_IP:8080/v1/systemone \
   -d '{"state":{"message":"I was charged twice"},"questions":{"refund":{"type":"noul","instructions":"Does the customer ask for a refund?"}}}'
 ```
 
-Successful responses include `answers`, `model`, and actual token counts in `usage`. The published image includes the multilingual model; `model=auto` (the default) and `model=multilingual` are available. See **Documentation** in the console for more request examples.
+Successful responses include `answers`, `model`, and actual token counts in `usage`. The published image includes the ad-clf classifier model (Chinese group-message ad detection, fp8 by default); `model=auto` (the default) and `model=ad-clf` are available. See **Documentation** in the console for more request examples.
 
 ## Usage statistics and storage
 
