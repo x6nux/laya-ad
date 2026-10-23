@@ -74,6 +74,22 @@ fp32 基准权重随 Release 发布（866MB），FP16/BF16/FP8/INT8/INT4 由 Git
 
 fp8/int8/int4 通过 `scripts/load_quantized.py` 的 `load_variant()` 加载（自动识别格式并反量化）；int8/int4 属有损量化，精度以自有数据验证为准。
 
+### 服务化镜像（laya-server 分支，ghcr）
+
+`laya-server/` 为独立维护分支（基线 1Panel-dev/laya-server @ 19471b2d）：Jev 兼容 `/v1/systemone` API + Web 控制台，后端接 ad-clf 分类器，内置动态微批 / CPU 半核线程 / bf16 推理（100 并发整批 ≤1s SLO 那套）。镜像构建时自动从 Release 最新权重在镜像内量化：
+
+```bash
+# latest 与 v1.0 = fp8；其余 tag：v1.0-fp32 / fp16 / bf16 / fp8 / int8 / int4
+docker run -d -p 8080:8080 -e LAYA_ADMIN_USERNAME=admin -e LAYA_ADMIN_PASSWORD='改成你的密码' \
+  ghcr.io/x6nux/laya-server:latest
+
+curl -X POST http://127.0.0.1:8080/v1/systemone \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"state":{"message":{"text":"加微信免费领取涨粉秘籍，名额有限！"}},"questions":{"is_ad":{"type":"choice","instructions":"判断是否广告","criteria":{"ad":"广告","clean":"正常"}}}}'
+```
+
+发新 Release 后 CI 自动重建全部精度镜像（`.github/workflows/docker-release.yml`）。
+
 ## v1 性能对比
 
 | 项 | 微调后 | 对照 |
