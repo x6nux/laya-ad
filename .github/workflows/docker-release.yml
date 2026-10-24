@@ -159,8 +159,9 @@ jobs:
           tar xzf fp32.tar.gz
           echo "SRC=$(find . -maxdepth 1 -type d -name 'laya-ad-*' | head -1)" >> "$GITHUB_ENV"
       - name: Quantize all precisions
-        run: python scripts/quantize_variants.py --src "$SRC" --out build/variants \
-          --variants fp32,fp16,bf16,fp8,int8,int4
+        run: |
+          python scripts/quantize_variants.py --src "$SRC" --out build/variants \
+            --variants fp32,fp16,bf16,fp8,int8,int4
       - name: Upload stable-name assets
         run: |
           for p in fp32 fp16 bf16 fp8 int8 int4; do
