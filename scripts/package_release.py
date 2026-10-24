@@ -237,12 +237,14 @@ def main():
         print(f"  {r['archive'].name}  sha256 {r['sha256']}")
 
     if args.upload:
-        files = [v[0]["archive"] for v in results.values()]
-        fp32_archive = out_dir / f"laya-ad-{args.tag}-fp32.tar.gz"
-        if fp32_archive.exists():
-            stable = out_dir / "laya-ad-fp32.tar.gz"
-            shutil.copy(fp32_archive, stable)
-            files.append(stable)  # 稳定名资产：laya-server 镜像构建从 releases/latest/download 自动取最新
+        # 稳定名资产：laya-ad-<精度>.tar.gz（不含版本号，供镜像构建/用户固定 URL 下载）
+        files = []
+        for precision in ("fp32", "fp16", "bf16", "fp8", "int8", "int4"):
+            versioned = out_dir / f"laya-ad-{args.tag}-{precision}.tar.gz"
+            if versioned.exists():
+                stable = out_dir / f"laya-ad-{precision}.tar.gz"
+                shutil.copy(versioned, stable)
+                files.append(stable)
         files.append(res_path)
         r = subprocess.run(["gh", "release", "create", args.tag, *map(str, files),
                             "--title", f"laya-ad {args.tag}", "--notes-file", str(res_path)],

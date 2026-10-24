@@ -1,9 +1,11 @@
 name: Build and push laya-server images
 
-# 镜像权重在构建时自动从 laya-ad Release 最新版下载（稳定名资产 laya-ad-fp32.tar.gz）
-# 并在镜像内按 PRECISION 量化。发布新 Release 会自动触发（含稳定名 fp32 资产上传），
-# 也可手动 dispatch 指定版本号。
-# 镜像 tag：<版本>-<精度>（如 v1.0-fp32）共六个；不带精度的 latest 与 <版本> = fp8。
+# 三类产物：
+# 1. 单精度镜像 <版本>-<精度>（fp32/fp16/bf16/fp8/int8/int4）——构建时自动从 Release
+#    最新稳定名资产 laya-ad-fp32.tar.gz 拉权重，镜像内量化并烘焙模型 id（laya-<版本>-<精度>）
+# 2. 多精度镜像 <版本>-multi——镜像不带权重，管理员经 /internal/models/catalog 自选精度下载
+# 3. 稳定名量化资产回传 Release（laya-ad-<精度>.tar.gz，去除名称里的版本号），并清理旧带版本号资产
+# latest 与裸版本 tag = fp8。
 
 on:
   release:
@@ -39,8 +41,26 @@ jobs:
       - name: Backend tests (ad-clf)
         run: cd laya-server/backend && python -m pytest tests/test_ad_classifier.py -q
 
-  build:
-    needs: backend-tests
+  resolve-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          elif [ -n "${{ github.event.release.tag_name }}" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          else
+            TAG="$(gh release view --repo ${{ github.repository }} --json tagName --jq .tagName)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  build-single:
+    needs: [backend-tests, resolve-tag]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -54,32 +74,22 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Resolve version tag
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            TAG="${{ inputs.tag }}"
-          elif [ -n "${{ github.event.release.tag_name }}" ]; then
-            TAG="${{ github.event.release.tag_name }}"
-          else
-            TAG="$(gh release view --repo ${{ github.repository }} --json tagName --jq .tagName)"
-          fi
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
-      - name: Build and push ${{ matrix.precision }}
+      - name: Build and push ${{ needs.resolve-tag.outputs.tag }}-${{ matrix.precision }}
         uses: docker/build-push-action@v6
         with:
           context: laya-server
+          target: single
           push: true
           platforms: linux/amd64
           build-args: |
             PRECISION=${{ matrix.precision }}
-          tags: ghcr.io/${{ github.repository_owner }}/laya-server:${{ env.TAG }}-${{ matrix.precision }}
+            MODEL_ID=laya-${{ needs.resolve-tag.outputs.tag }}-${{ matrix.precision }}
+          tags: ghcr.io/${{ github.repository_owner }}/laya-server:${{ needs.resolve-tag.outputs.tag }}-${{ matrix.precision }}
           cache-from: type=gha,scope=laya-${{ matrix.precision }}
           cache-to: type=gha,mode=max,scope=laya-${{ matrix.precision }}
 
-  version-tags:
-    needs: build
+  build-multi:
+    needs: [backend-tests, resolve-tag]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -89,28 +99,77 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Resolve version tag
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            TAG="${{ inputs.tag }}"
-          elif [ -n "${{ github.event.release.tag_name }}" ]; then
-            TAG="${{ github.event.release.tag_name }}"
-          else
-            TAG="$(gh release view --repo ${{ github.repository }} --json tagName --jq .tagName)"
-          fi
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
+      - name: Build and push ${{ needs.resolve-tag.outputs.tag }}-multi
+        uses: docker/build-push-action@v6
+        with:
+          context: laya-server
+          target: multi
+          push: true
+          platforms: linux/amd64
+          tags: ghcr.io/${{ github.repository_owner }}/laya-server:${{ needs.resolve-tag.outputs.tag }}-multi
+          cache-from: type=gha,scope=laya-multi
+          cache-to: type=gha,mode=max,scope=laya-multi
+
+  version-tags:
+    needs: [build-single]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Push latest and bare version tags (fp8)
         uses: docker/build-push-action@v6
         with:
           context: laya-server
+          target: single
           push: true
           platforms: linux/amd64
           build-args: |
             PRECISION=fp8
+            MODEL_ID=laya-${{ needs.resolve-tag.outputs.tag }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/laya-server:latest
-            ghcr.io/${{ github.repository_owner }}/laya-server:${{ env.TAG }}
+            ghcr.io/${{ github.repository_owner }}/laya-server:${{ needs.resolve-tag.outputs.tag }}
           cache-from: type=gha,scope=laya-fp8
           cache-to: type=gha,scope=laya-fp8,mode=max
+
+  stable-assets:
+    needs: [backend-tests, resolve-tag]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.resolve-tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install quantization deps
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers==5.20.2 "safetensors>=0.6.0"
+      - name: Download fp32 base
+        run: |
+          gh release download "$TAG" --repo ${{ github.repository }} \
+            -p 'laya-ad-fp32.tar.gz' -O fp32.tar.gz
+          tar xzf fp32.tar.gz
+          echo "SRC=$(find . -maxdepth 1 -type d -name 'laya-ad-*' | head -1)" >> "$GITHUB_ENV"
+      - name: Quantize all precisions
+        run: python scripts/quantize_variants.py --src "$SRC" --out build/variants \
+          --variants fp32,fp16,bf16,fp8,int8,int4
+      - name: Upload stable-name assets
+        run: |
+          for p in fp32 fp16 bf16 fp8 int8 int4; do
+            tar czf "laya-ad-$p.tar.gz" -C build/variants "$p"
+            gh release upload "$TAG" "laya-ad-$p.tar.gz" --repo ${{ github.repository }} --clobber
+          done
+      - name: Remove versioned assets from release
+        run: |
+          for p in fp32 fp16 bf16 fp8 int8 int4; do
+            gh release delete-asset "$TAG" "laya-ad-$TAG-$p.tar.gz" \
+              --repo ${{ github.repository }} --yes || true
+          done

@@ -54,8 +54,13 @@ class InferenceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     state: str | dict[str, object] | list[object]
     questions: Annotated[dict[str, Question], Field(min_length=1, max_length=50)]
-    model: Literal["auto", "english", "multilingual", "typed-decisions", "ad-clf"] = "auto"
+    model: str = "auto"
     max_len: Annotated[int, Field(strict=True, ge=512, le=8192)] | None = None
+
+
+class ModelDownloadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    precision: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=16)]
 
 
 class LoginRequest(BaseModel):

@@ -16,10 +16,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from .ad_classifier import AdClassifierPredictor, Predictor
+from .ad_classifier import (AdClassifierPredictor, MultiPrecisionPredictor,
+                            Predictor, served_model_ids)
 from .config import Settings
 from .database import Database, utc_now
-from .schemas import CreateKeyRequest, InferenceRequest, LoginRequest
+from .model_manager import ModelManager
+from .schemas import (CreateKeyRequest, InferenceRequest, LoginRequest,
+                      ModelDownloadRequest)
 from .usage_writer import UsageEvent, UsageWriter
 
 logger = logging.getLogger(__name__)
@@ -54,6 +57,8 @@ def create_app(settings: Settings | None = None, predictor: Predictor | None = N
     hasher = PasswordHasher()
     router_holder: dict[str, Predictor] = {}
     router_lock = threading.Lock()
+    manager = None if (settings.model_dir / "MODEL_ID.txt").is_file() \
+        else ModelManager(settings.model_dir, settings.device)
 
     @app.exception_handler(RequestValidationError)
     def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -109,23 +114,30 @@ def create_app(settings: Settings | None = None, predictor: Predictor | None = N
     ApiKeyId = Annotated[int, Depends(api_key_id)]
 
     def infer(payload: InferenceRequest, source: str, key_id: int | None) -> dict[str, Any]:
-        if payload.model not in ("auto", "ad-clf"):
-            raise error(422, "MODEL_NOT_AVAILABLE", "Only the ad-clf model is installed")
         with router_lock:
             if "router" not in router_holder:
                 try:
-                    router_holder["router"] = predictor or AdClassifierPredictor(
-                        settings.model_dir, settings.device
-                    )
+                    if (settings.model_dir / "MODEL_ID.txt").is_file():
+                        router_holder["router"] = predictor or AdClassifierPredictor(
+                            settings.model_dir, settings.device
+                        )
+                    else:
+                        router_holder["router"] = predictor or MultiPrecisionPredictor(
+                            settings.model_dir, settings.device
+                        )
                 except Exception:
                     logger.exception("Failed to initialize ad-clf predictor")
                     raise error(503, "MODEL_UNAVAILABLE", "Model is unavailable")
+        served = router_holder["router"].served_ids()
+        if payload.model not in served:
+            raise error(422, "MODEL_NOT_AVAILABLE", "Installed models: " + ", ".join(served))
         started = time.monotonic()
         try:
             overrides = {} if payload.max_len is None else {"max_len": payload.max_len}
             result = router_holder["router"].predict(
                 payload.state,
                 {qid: q.model_dump(exclude_none=True) for qid, q in payload.questions.items()},
+                model=None if payload.model == "auto" else payload.model,
                 **overrides,
             )
             if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
@@ -213,7 +225,28 @@ def create_app(settings: Settings | None = None, predictor: Predictor | None = N
 
     @app.get("/internal/models")
     def available_models(session: Session) -> dict[str, list[str]]:
-        return {"models": ["auto", "ad-clf"]}
+        router = router_holder.get("router")
+        if router is not None and hasattr(router, "served_ids"):
+            return {"models": router.served_ids()}
+        return {"models": served_model_ids(settings.model_dir)}
+
+    @app.get("/internal/models/catalog")
+    def model_catalog(session: Session) -> dict[str, Any]:
+        if manager is None:
+            raise error(422, "MODEL_NOT_DOWNLOADABLE", "Baked image: model is built in")
+        return manager.catalog()
+
+    @app.post("/internal/models/download")
+    def download_model(payload: ModelDownloadRequest, session: Session, _: WriteSession) -> dict[str, Any]:
+        if manager is None:
+            raise error(422, "MODEL_NOT_DOWNLOADABLE", "Baked image: model is built in")
+        return manager.download(payload.precision)
+
+    @app.get("/internal/models/download/status")
+    def download_status(session: Session) -> dict[str, Any]:
+        if manager is None:
+            return {"state": "baked", "precision": None, "error": None}
+        return manager.status()
 
     @app.post("/internal/api-keys", status_code=201)
     def create_key(payload: CreateKeyRequest, session: Session, _: WriteSession) -> dict[str, Any]:

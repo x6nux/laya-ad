@@ -33,7 +33,8 @@ def tiny_model_dir(tmp_path_factory):
     model.config.id2label = {0: "ad", 1: "normal"}
     model.config.label2id = {"ad": 0, "normal": 1}
     model.save_pretrained(d, safe_serialization=True)
-    (d / "PRECISION.txt").write_text("fp32", encoding="utf-8")
+    (d / "PRECISION.txt").write_text("fp8", encoding="utf-8")
+    (d / "MODEL_ID.txt").write_text("laya-test-fp8", encoding="utf-8")
     return d
 
 
@@ -58,7 +59,18 @@ def client(client_factory, tiny_model_dir, tmp_path):
 
 
 def test_models_list(client):
-    assert client.get("/internal/models").json() == {"models": ["auto", "ad-clf"]}
+    assert client.get("/internal/models").json() == {
+        "models": ["auto", "laya", "laya-test", "laya-test-fp8"]}
+
+
+def test_laya_alias_accepted(client):
+    r = client.post("/v1/systemone", json={
+        "state": "hello",
+        "questions": {"q": {"type": "noul", "instructions": "这是 advertisement 广告吗？"}},
+        "model": "laya",
+    })
+    assert r.status_code == 200
+    assert r.json()["model"] == "laya-test-fp8"
 
 
 def test_rejects_unbundled_models(client):
@@ -98,7 +110,7 @@ def test_systemone_answers(client):
     usage = body["usage"]
     assert isinstance(usage["input_tokens"], int) and usage["input_tokens"] > 0
     assert usage["output_tokens"] == len(payload["questions"])
-    assert body["model"].startswith("laya-ad-clf-")
+    assert body["model"] == "laya-test-fp8"
 
 
 def test_state_string_and_variants(client):
@@ -109,3 +121,37 @@ def test_state_string_and_variants(client):
     })
     assert r.status_code == 200
     assert r.json()["answers"]["q"]["choice"] in ("ad", "clean")
+
+
+def test_multi_precision_root(client_factory, tiny_model_dir, tmp_path):
+    """multi 模式：根目录下多个精度子目录，按 model id 懒加载切换。"""
+    import shutil
+    root = tmp_path / "multi-root"
+    root.mkdir()
+    for mid, prec in (("laya-test-fp8", "fp8"), ("laya-test-int4", "int4")):
+        d = root / f"variant-{prec}"
+        d.mkdir()
+        for f in ("model.safetensors", "config.json", "tokenizer.json", "tokenizer_config.json"):
+            shutil.copy(tiny_model_dir / f, d / f)
+        (d / "PRECISION.txt").write_text(prec, encoding="utf-8")
+        (d / "MODEL_ID.txt").write_text(mid, encoding="utf-8")
+    c = client_factory(create_app(_settings(root, tmp_path)))
+    assert c.post("/internal/auth/login", json={"username": "admin", "password": PASSWORD},
+                  headers=ORIGIN).status_code == 200
+    csrf = c.get("/internal/auth/session").json()["csrf_token"]
+    key = c.post("/internal/api-keys", json={"name": "multi"},
+                 headers={**ORIGIN, "X-CSRF-Token": csrf}).json()["key"]
+    c.headers.update({"Authorization": f"Bearer {key}"})
+    assert c.get("/internal/models").json() == {
+        "models": ["auto", "laya", "laya-test", "laya-test-fp8", "laya-test-int4"]}
+    payload = {"state": "加微信免费领取涨粉秘籍，名额有限！",
+               "questions": {"is_ad": {"type": "choice", "instructions": "判断",
+                                       "criteria": {"ad": "广告", "clean": "正常"}}}}
+    r = c.post("/v1/systemone", json={**payload, "model": "laya-test-int4"})
+    assert r.status_code == 200
+    assert r.json()["model"] == "laya-test-int4"
+    r = c.post("/v1/systemone", json={**payload, "model": "laya"})
+    assert r.status_code == 200
+    assert r.json()["model"] == "laya-test-fp8"  # laya 别名 → fp8 默认变体
+    r = c.post("/v1/systemone", json={**payload, "model": "laya-nonexist"})
+    assert r.status_code == 422

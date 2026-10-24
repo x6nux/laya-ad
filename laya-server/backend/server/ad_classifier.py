@@ -37,6 +37,40 @@ class Predictor(Protocol):
                 *, max_len: int | None = None) -> dict[str, Any]: ...
 
 
+def model_identity(model_dir: Path) -> tuple[str, str]:
+    """读取模型目录身份：(model_id, precision)。缺省文件时回退通用名。"""
+    model_dir = Path(model_dir)
+    precision = "unknown"
+    p_file = model_dir / "PRECISION.txt"
+    if p_file.is_file():
+        precision = p_file.read_text(encoding="utf-8").strip() or "unknown"
+    mid_file = model_dir / "MODEL_ID.txt"
+    model_id = mid_file.read_text(encoding="utf-8").strip() if mid_file.is_file() else ""
+    if not model_id:
+        model_id = "laya" if precision == "fp8" else f"laya-{precision}"
+    return model_id, precision
+
+
+def _version_of(model_id: str) -> str | None:
+    """'laya-v1.0-fp8' → 'v1.0'；不符合 laya-<版本>-<精度> 模式则 None。"""
+    if not model_id.startswith("laya-"):
+        return None
+    rest = model_id[len("laya-"):]
+    return rest.rsplit("-", 1)[0] if "-" in rest else None
+
+
+def _accepted_ids(model_id: str, precision: str) -> list[str]:
+    """单模型镜像可接受的 model id 集合（规范序：auto, laya, laya-<版本>, 完整 id）。
+    laya/laya-<版本> 别名仅 fp8 默认镜像提供。"""
+    ids = ["auto"]
+    if precision == "fp8":
+        version = _version_of(model_id)
+        if version:
+            ids += ["laya", f"laya-{version}"]
+    ids.append(model_id)
+    return ids
+
+
 def _extract_text(state: Any) -> str:
     """从 Jev state 中提取分类文本：字符串直取；dict 按 message.text/text/body/content 顺序；
     其余结构 JSON 序列化。"""
@@ -125,16 +159,19 @@ class AdClassifierPredictor:
         torch.set_num_threads(threads if self.device == "cpu" else max(4, threads // 2))
         self.model_dir = Path(model_dir)
         self.model, self.tokenizer = load_ad_model(self.model_dir, self.device)
-        self.precision = detect_precision(self.model_dir)
+        self.model_id, self.precision = model_identity(self.model_dir)
+        self.accepted_ids = _accepted_ids(self.model_id, self.precision)
         id2label = {int(k): str(v).casefold() for k, v in self.model.config.id2label.items()}
         self.ad_id = next((i for i, name in id2label.items() if name == "ad"), None)
         self.clean_id = next((i for i, name in id2label.items() if name == "normal"), None)
         if self.ad_id is None or self.clean_id is None:
             raise RuntimeError(f"模型 id2label 缺少 ad/normal: {id2label}")
-        self.model_name = f"laya-ad-clf-{self.precision}"
         self._batcher = _MicroBatcher(self._forward_batch,
                                       int(os.environ.get("LAYA_AD_BATCH", "32")),
                                       int(os.environ.get("LAYA_AD_BATCH_WINDOW_MS", "15")))
+
+    def served_ids(self) -> list[str]:
+        return self.accepted_ids
 
     def _forward_batch(self, texts: list[str], seq_len: int) -> list[tuple[float, float]]:
         enc = self.tokenizer(texts, truncation=True, max_length=seq_len,
@@ -182,7 +219,7 @@ class AdClassifierPredictor:
 
         usage = {"input_tokens": self._count_tokens(text, seq_len) * len(questions),
                  "output_tokens": len(questions)}
-        return {"answers": answers, "model": self.model_name, "usage": usage}
+        return {"answers": answers, "model": self.model_id, "usage": usage}
 
     def _count_tokens(self, text: str, seq_len: int) -> int:
         enc = self.tokenizer(text, truncation=True, max_length=seq_len)
@@ -210,3 +247,88 @@ class AdClassifierPredictor:
         # noul（与广告无关的是非题）：0.5 = 无信息
         return {"type": "noul", "noul": 0.5, "confidence": 0.5, "answer_confidence": 0.5,
                 "unsupported": True}
+
+
+class MultiPrecisionPredictor:
+    """多精度镜像的 Predictor：LAYA_MODEL_DIR 下每个子目录一个精度变体
+    （各自含 MODEL_ID.txt / PRECISION.txt / model.safetensors），
+    按请求的 model id 懒加载切换；auto/laya/laya-<版本> 指向 fp8 变体。"""
+
+    def __init__(self, model_dir: Path, device: str | None):
+        self.root = Path(model_dir)
+        self.variants: dict[str, tuple[Path, str]] = {}
+        self.default_id: str | None = None
+        for d in sorted(self.root.iterdir()):
+            if not d.is_dir() or not (d / "model.safetensors").is_file():
+                continue
+            mid, prec = model_identity(d)
+            self.variants[mid] = (d, prec)
+            if prec == "fp8":
+                self.default_id = mid
+        if not self.variants:
+            raise RuntimeError(f"多模型目录为空: {self.root}")
+        if self.default_id is None:
+            self.default_id = next(iter(self.variants))
+        self.version = _version_of(self.default_id)
+        self.accepted_ids = ["auto", "laya"] \
+            + ([f"laya-{self.version}"] if self.version else []) \
+            + sorted(self.variants)
+        self.device = device or "cpu"
+        self._cache: dict[str, AdClassifierPredictor] = {}
+
+    def resolve(self, model: str | None) -> "AdClassifierPredictor":
+        if model in (None, "auto", "laya") or (self.version and model == f"laya-{self.version}"):
+            mid = self.default_id
+        elif model in self.variants:
+            mid = model
+        else:
+            raise ValueError(f"unknown model id: {model}")
+        if mid not in self._cache:
+            d, _ = self.variants[mid]
+            self._cache[mid] = AdClassifierPredictor(d, self.device)
+        return self._cache[mid]
+
+    def refresh(self) -> None:
+        """重新扫描模型目录（新下载的变体上线）。"""
+        for d in sorted(self.root.iterdir()):
+            if d.is_dir() and (d / "MODEL_ID.txt").is_file() and (d / "model.safetensors").is_file():
+                mid, prec = model_identity(d)
+                if mid not in self.variants:
+                    self.variants[mid] = (d, prec)
+                    if prec == "fp8" and self.default_id is None:
+                        self.default_id = mid
+        self.version = _version_of(self.default_id) or self.version
+        self.accepted_ids = ["auto", "laya"] \
+            + ([f"laya-{self.version}"] if self.version else []) \
+            + sorted(self.variants)
+
+    def served_ids(self) -> list[str]:
+        self.refresh()
+        return self.accepted_ids
+
+    def predict(self, state: Any, questions: dict[str, Any], model: str | None = None,
+                *, max_len: int | None = None) -> dict[str, Any]:
+        predictor = self.resolve(model)
+        return predictor.predict(state, questions, max_len=max_len)
+
+
+def served_model_ids(model_dir: Path) -> list[str]:
+    """create_app 启动时确定对外可用的 model id 列表（单模型 / 多模型目录皆可）。"""
+    model_dir = Path(model_dir)
+    if (model_dir / "MODEL_ID.txt").is_file():
+        mid, prec = model_identity(model_dir)
+        return _accepted_ids(mid, prec)
+    ids = ["auto", "laya"]
+    default_version = None
+    seen: list[str] = []
+    for d in sorted(model_dir.iterdir()):
+        if d.is_dir() and (d / "MODEL_ID.txt").is_file():
+            mid, prec = model_identity(d)
+            if mid not in seen:
+                seen.append(mid)
+            if prec == "fp8":
+                v = _version_of(mid)
+                if v:
+                    default_version = v
+                    ids.append(f"laya-{v}")
+    return ids + seen

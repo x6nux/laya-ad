@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input"
 import { apiErrorMessage, useI18n, type MessageKey, type Translate } from "./i18n"
 
 type QuestionType = "noul" | "score" | "choice"
-export type Model = "auto" | "english" | "multilingual" | "typed-decisions"
+export type Model = string
 type Question = {
   uid: string
   id: string
@@ -26,9 +26,8 @@ export const sampleRequest = {
   },
   model: "auto",
 }
-const chineseSampleRequest = { ...sampleRequest, state: { message: "我的账户被重复扣费了，请尽快退款。" }, model: "multilingual" }
-const traditionalSampleRequest = { ...sampleRequest, state: { message: "我的帳戶被重複扣款了，請盡快退款。" }, model: "multilingual" }
-const models: Model[] = ["auto", "english", "multilingual", "typed-decisions"]
+const chineseSampleRequest = { ...sampleRequest, state: { message: "我的账户被重复扣费了，请尽快退款。" } }
+const traditionalSampleRequest = { ...sampleRequest, state: { message: "我的帳戶被重複扣款了，請盡快退款。" } }
 
 class DraftError extends Error {
   constructor(readonly key: MessageKey, readonly values?: Record<string, string | number>) { super(key) }
@@ -53,7 +52,7 @@ function parseDraft(value: string): Draft {
   if (Object.keys(data).some(key => !["state", "questions", "model", "max_len"].includes(key))) throw new DraftError("playgroundFormUnsupported")
   if (!(typeof data.state === "string" || (data.state !== null && typeof data.state === "object"))) throw new DraftError("playgroundFormUnsupported")
   const model = Object.hasOwn(data, "model") ? data.model : "auto"
-  if (!models.includes(model as Model)) throw new DraftError("playgroundFormUnsupported")
+  if (typeof model !== "string") throw new DraftError("playgroundFormUnsupported")
   const maxLen = data.max_len == null ? "" : String(checkMaxLen(data.max_len))
   if (!data.questions || typeof data.questions !== "object" || Array.isArray(data.questions)) throw new DraftError("playgroundFormUnsupported")
   const questions = Object.entries(data.questions).map(([id, definition]) => {
@@ -127,7 +126,7 @@ export function Playground({ run, loadModels }: { run: (body: string) => Promise
   useEffect(() => {
     let active = true
     loadModels().then(({ models: installed }) => {
-      if (active) setAvailableModels(installed.filter(model => models.includes(model)))
+      if (active) setAvailableModels(installed)
     }).catch(() => {})
     return () => { active = false }
   }, [loadModels])
